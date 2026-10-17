@@ -8,7 +8,7 @@ AML mod for **GTA: San Andreas Android** that adds decorative litter around the 
 
 | Roadside litter                                 | Litter placement                                        |
 | ----------------------------------------------- | ------------------------------------------------------- |
-| ![Roadside litter near CJ](review/review1.jpeg) | ![(Litter placed around the player]](review/review2.jpeg) |
+| ![Roadside litter near CJ](review/review1.jpeg) | ![(Litter placed around the player)](review/review2.jpeg) |
 
 ## Features
 
