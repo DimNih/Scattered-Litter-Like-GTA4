@@ -1,0 +1,16 @@
+# Android NDK build output
+/obj/
+/libs/
+*.o
+*.a
+*.so
+*.d
+
+# Runtime logs
+*.log
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
