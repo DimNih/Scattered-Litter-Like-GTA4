@@ -2,6 +2,7 @@
 #include <mod/logger.h>
 #include <mod/config.h>
 #include "Paper.h"
+#include "Rat.h"
 
 #include <aml-psdk/game_sa/Events.h>
 #include <aml-psdk/game_sa/engine/Streaming.h>
@@ -569,9 +570,24 @@ ON_MOD_LOAD()
             MODEL_VARIANT_COUNT, g_maxObjects, g_minSpawnDistance, g_spawnRadius,
         g_minObjectSpacing, g_cleanupRadius, g_spawnIntervalMs);
     logger->Info("PC Rub_1-Rub_27 DFF/TXD hashes are not Android model IDs; built-in models use random scale and heading.");
+    Rat::Initialize(
+        cfg->GetInt("Enabled", 1, "Rat") != 0,
+        cfg->GetInt("ModelId", Rat::DEFAULT_MODEL_ID, "Rat"),
+        cfg->GetInt("MaxRats", 5, "Rat"),
+        cfg->GetInt("SpawnIntervalMs", 6000, "Rat"),
+        cfg->GetFloat("MoveSpeed", 3.0f, "Rat"),
+        cfg->GetFloat("SpawnMinDistance", 12.0f, "Rat"),
+        cfg->GetFloat("SpawnRadius", 48.0f, "Rat"),
+        cfg->GetFloat("CleanupRadius", 90.0f, "Rat"),
+        cfg->GetFloat("Scale", 0.25f, "Rat"),
+        cfg->GetFloat("HeadingOffset", -90.0f, "Rat"),
+        cfg->GetInt("SoundEnabled", 1, "Rat") != 0,
+        cfg->GetFloat("SoundRadius", 20.0f, "Rat"),
+        cfg->GetInt("LocalLog", 1, "Rat") != 0);
     Events::gameProcessEvent.after += []() { Tick(); };
 }
 
 ON_MOD_UNLOAD()
 {
+    Rat::Shutdown();
 }
