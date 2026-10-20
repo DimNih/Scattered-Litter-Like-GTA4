@@ -6,9 +6,9 @@ AML mod for **GTA: San Andreas Android** that adds roadside litter and loose pap
 
 ## Screenshots
 
-| Roadside litter | Ground paper | Paper on terrain |
-| --- | --- | --- |
-| ![Roadside litter near CJ](review/review1.jpeg) | ![Litter placed around the player](review/review2.jpeg) | ![Paper lying on the ground near player](review/review3.jpeg) |
+| Roadside litter | Ground paper | Paper on terrain | Rats |
+| --- | --- | --- | --- |
+| ![Roadside litter near CJ](review/review1.jpeg) | ![Litter placed around the player](review/review2.jpeg) | ![Paper lying on the ground near player](review/review3.jpeg) | ![Rat mod in game](review/review4.jpeg) |
 
 ## Features
 
