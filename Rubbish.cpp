@@ -3,6 +3,7 @@
 #include <mod/config.h>
 #include "Paper.h"
 #include "Rat.h"
+#include "Puddle.h"
 
 #include <aml-psdk/game_sa/Events.h>
 #include <aml-psdk/game_sa/engine/Streaming.h>
@@ -16,20 +17,21 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <algorithm>
 
 
 namespace
 {
-    // Verified GTA:SA model ID: PROC_RUBBISH_4 (2672), PROC_RUB.txd.
-    // These four built-in debris models are visual fallbacks. Custom Rub_*.dff
+    // Built-in PROC_RUBBISH debris model IDs (2670-2677), using PROC_RUB.txd.
+    // These built-in debris models are visual fallbacks. Custom Rub_*.dff
     // files require the CLEO+ special-render-object loader and are not normal SA IDs.
-    constexpr int MODEL_VARIANTS[] = { 2670, 2671, 2672, 2673 };
+    constexpr int MODEL_VARIANTS[] = { 2670, 2671, 2672, 2673, 2674, 2675, 2676, 2677 };
     constexpr int MODEL_VARIANT_COUNT = sizeof(MODEL_VARIANTS) / sizeof(MODEL_VARIANTS[0]);
     constexpr int DEFAULT_PAPER_MODEL_ID = 1577; // drug_yellow.dff
     constexpr int STREAMING_GAME_REQUIRED = 2;
     constexpr int MAX_TRACKED_OBJECTS = 120;
     constexpr int MAX_ROAD_CANDIDATES = 32;
-    constexpr int MAX_PAPER_OBJECTS = 55;
+    constexpr int MAX_PAPER_OBJECTS = 18;
 
     struct LitterObject
     {
@@ -69,7 +71,7 @@ namespace
     float g_minObjectSpacing = 2.5f;
     float g_roadLateralRange = 8.0f;
     int g_spawnIntervalMs = 1300;
-    int g_paperSpawnIntervalMs = 450;
+    int g_paperSpawnIntervalMs = 1500;
     int g_maxPaperObjects = MAX_PAPER_OBJECTS;
     int g_continuousFlightPercent = 35;
     int g_maxRubbishObjects = 30;
@@ -120,7 +122,7 @@ namespace
         g_lastTrafficScanTime = now;
         for (auto& paper : g_objects)
         {
-            if (!paper.active || !paper.flyingPaper || now - paper.lastDisturbanceMs < 900U) continue;
+            if (!paper.active || !paper.flyingPaper || now - paper.lastDisturbanceMs < 1600U) continue;
             float bestDistanceSq = 0.0f;
             float pushX = 0.0f, pushY = 0.0f;
             float strength = 0.0f;
@@ -142,8 +144,8 @@ namespace
                     CPed* ped = static_cast<CPed*>(entity);
                     // Ignore idle or slowly walking peds; only a running pass should disturb paper.
                     entitySpeed = ped->GetSpeedUnits();
-                    influenceRadius = 3.2f;
-                    pushStrength = 0.85f;
+                    influenceRadius = 3.6f;
+                    pushStrength = 1.10f;
                     if (entitySpeed < 0.10f) continue;
                 }
                 else if (entity->IsVehicle())
@@ -269,6 +271,10 @@ namespace
         }
         // Paper is visual debris only; it must never block or damage traffic.
         Command<Commands::SET_OBJECT_COLLISION>(handle, false);
+        // Script motion owns the object; GTA rigid-body simulation must not
+        // compete with per-frame coordinate/rotation updates and cause jitter.
+        Command<Commands::SET_OBJECT_DYNAMIC>(handle, false);
+        Command<Commands::SET_OBJECT_VELOCITY>(handle, 0.0f, 0.0f, 0.0f);
 
         const float windAngle = RandomFloat(0.0f, 6.28318531f);
         const float windSpeed = RandomFloat(1.2f, 3.2f);
@@ -289,7 +295,8 @@ namespace
             slot->rotation = RandomFloat(0.0f, 360.0f);
         Command<Commands::SET_OBJECT_ROTATION>(handle,
             Paper::GROUND_ROTATION_X, Paper::GROUND_ROTATION_Y, Paper::GROUND_ROTATION_Z);
-        Command<Commands::SET_OBJECT_SCALE>(handle, RandomFloat(0.7f, 1.0f));
+        // Make the newspaper clearly readable while keeping it believable.
+        Command<Commands::SET_OBJECT_SCALE>(handle, RandomFloat(1.80f, 2.20f));
         if (!g_paperSpawnLogged)
         {
             logger->Info("First flying paper spawned: model=%d handle=%d distance=%.1f height=%.1f.",
@@ -406,7 +413,9 @@ namespace
             return false;
         }
         Command<Commands::SET_OBJECT_HEADING>(handle, roadHeading);
-        Command<Commands::SET_OBJECT_SCALE>(handle, RandomFloat(0.75f, 1.25f));
+        // Ground litter is a little larger than the flying sheet so it does
+        // not disappear into the road texture at normal camera distance.
+        Command<Commands::SET_OBJECT_SCALE>(handle, RandomFloat(1.10f, 1.40f));
 
         slot->handle = handle;
         slot->x = x;
@@ -535,7 +544,7 @@ ON_MOD_LOAD()
     g_spawnIntervalMs = cfg->GetInt("SpawnIntervalMs", 1300, "General");
     g_maxPaperObjects = cfg->GetInt("MaxPaperObjects", MAX_PAPER_OBJECTS, "Paper");
     g_continuousFlightPercent = cfg->GetInt("ContinuousFlightPercent", 35, "Paper");
-    g_paperSpawnIntervalMs = cfg->GetInt("SpawnIntervalMs", 450, "Paper");
+    g_paperSpawnIntervalMs = cfg->GetInt("SpawnIntervalMs", 1500, "Paper");
     g_maxRubbishObjects = cfg->GetInt("MaxRubbishObjects", 30, "General");
 
     logger->Info("Config: enabled=%d max=%d minDistance=%.1f maxDistance=%.1f spacing=%.1f cleanup=%.1f interval=%dms",
@@ -550,7 +559,7 @@ ON_MOD_LOAD()
     if (g_maxPaperObjects > MAX_PAPER_OBJECTS) g_maxPaperObjects = MAX_PAPER_OBJECTS;
     if (g_continuousFlightPercent < 0) g_continuousFlightPercent = 0;
     if (g_continuousFlightPercent > 90) g_continuousFlightPercent = 90;
-    if (g_paperSpawnIntervalMs < 150) g_paperSpawnIntervalMs = 150;
+    if (g_paperSpawnIntervalMs < 1500) g_paperSpawnIntervalMs = 1500;
     if (g_paperSpawnIntervalMs > 5000) g_paperSpawnIntervalMs = 5000;
     if (g_minSpawnDistance < 20.0f) g_minSpawnDistance = 20.0f;
     if (g_minSpawnDistance > 38.0f) g_minSpawnDistance = 38.0f;
@@ -573,21 +582,35 @@ ON_MOD_LOAD()
     Rat::Initialize(
         cfg->GetInt("Enabled", 1, "Rat") != 0,
         cfg->GetInt("ModelId", Rat::DEFAULT_MODEL_ID, "Rat"),
-        cfg->GetInt("MaxRats", 5, "Rat"),
-        cfg->GetInt("SpawnIntervalMs", 6000, "Rat"),
+        cfg->GetInt("MaxRats", 3, "Rat"),
+        cfg->GetInt("SpawnIntervalMs", 15000, "Rat"),
         cfg->GetFloat("MoveSpeed", 3.0f, "Rat"),
         cfg->GetFloat("SpawnMinDistance", 12.0f, "Rat"),
         cfg->GetFloat("SpawnRadius", 48.0f, "Rat"),
         cfg->GetFloat("CleanupRadius", 90.0f, "Rat"),
-        cfg->GetFloat("Scale", 0.25f, "Rat"),
+        cfg->GetFloat("Scale", 0.10f, "Rat"),
         cfg->GetFloat("HeadingOffset", -90.0f, "Rat"),
         cfg->GetInt("SoundEnabled", 1, "Rat") != 0,
         cfg->GetFloat("SoundRadius", 20.0f, "Rat"),
         cfg->GetInt("LocalLog", 1, "Rat") != 0);
+    Puddle::Initialize(
+        cfg->GetInt("Enabled", 1, "Puddle") != 0,
+        cfg->GetInt("MaxPuddles", 2, "Puddle"),
+        cfg->GetInt("SpawnIntervalMs", 20000, "Puddle"),
+        cfg->GetFloat("SpawnMinDistance", 10.0f, "Puddle"),
+        cfg->GetFloat("SpawnRadius", 45.0f, "Puddle"),
+        cfg->GetFloat("CleanupRadius", 75.0f, "Puddle"),
+        static_cast<unsigned int>(std::max(45000,
+            cfg->GetInt("LifeMinMs", 60000, "Puddle"))),
+        static_cast<unsigned int>(std::max(45000,
+            cfg->GetInt("LifeMaxMs", 120000, "Puddle"))),
+        cfg->GetInt("ReflectionEnabled", 1, "Puddle") != 0,
+        cfg->GetFloat("ReflectionDistance", 14.0f, "Puddle"));
     Events::gameProcessEvent.after += []() { Tick(); };
 }
 
 ON_MOD_UNLOAD()
 {
+    Puddle::Shutdown();
     Rat::Shutdown();
 }

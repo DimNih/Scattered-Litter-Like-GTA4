@@ -9,11 +9,15 @@ namespace Paper
     void Disturb(float& velocityX, float& velocityY, float& velocityZ,
         bool& airborne, float directionX, float directionY, float strength)
     {
-        velocityX = velocityX * 0.35f + directionX * strength;
-        velocityY = velocityY * 0.35f + directionY * strength;
-        // Pedestrians make a small puff that nudges the sheet; vehicles create
+        // Add an impulse rather than replacing most of the existing velocity;
+        // this makes a pass-by look like a glide instead of a sudden snap.
+        const float impulse = strength <= 1.5f ? 0.65f : strength * 0.75f;
+        velocityX += directionX * impulse;
+        velocityY += directionY * impulse;
+        // A pedestrian only lifts the sheet slightly; moving vehicles create
         // a stronger gust capable of lofting it properly.
-        velocityZ = strength <= 1.5f ? 0.45f : 2.4f + strength * 0.45f;
+        velocityZ = std::max(velocityZ,
+            strength <= 1.5f ? 0.75f : 2.0f + strength * 0.35f);
         airborne = true;
     }
 

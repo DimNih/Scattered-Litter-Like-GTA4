@@ -1,0 +1,12 @@
+Rat sound source
+=================
+
+The bundled rat_squeak.wav is a short multi-part squeak/chitter remix made
+from the CC0 "Squeaky Rat" pack by Iwan "qubodup" Gabovitch:
+
+https://opengameart.org/content/squeaky-rat
+https://opengameart.org/users/qubodup
+
+The source page identifies the pack as CC0. The remix uses the Attack, Pain,
+and Death vocal variants, converted to mono PCM16 at 22050 Hz for the Android
+OpenSL ES buffer player used by this mod.

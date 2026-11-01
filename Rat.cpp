@@ -4,9 +4,11 @@
 #include <mod/logger.h>
 
 #include <aml-psdk/game_sa/Events.h>
+#include <aml-psdk/game_sa/engine/World.h>
 #include <aml-psdk/game_sa/engine/ModelInfo.h>
 #include <aml-psdk/game_sa/engine/Streaming.h>
 #include <aml-psdk/game_sa/base/Timer.h>
+#include <aml-psdk/game_sa/entity/Entity.h>
 #include <aml-psdk/game_sa/entity/PlayerPed.h>
 #include <aml-psdk/game_sa/utils/OpcodeCaller.h>
 
@@ -26,22 +28,61 @@ namespace Rat
     {
         constexpr int MAX_RATS = 12;
         constexpr int STREAMING_GAME_REQUIRED = 2;
+        constexpr int MAX_NEARBY_WORLD_ENTITIES = 256;
+        constexpr float BIN_WANDER_RADIUS = 8.5f;
+        constexpr float BIN_MIN_OFFSET = 0.85f;
+        constexpr unsigned int ANCHOR_COOLDOWN_MS = 90000U;
+        constexpr float ANCHOR_COOLDOWN_RADIUS = 18.0f;
+        constexpr int MAX_CONFIGURED_RATS = 3;
+
+        // GTA SA object IDs for bins, waste bins, skips and dumpsters.
+        constexpr int TRASH_BIN_MODEL_IDS[] = {
+            1227, 1235, 1300,
+            1328, 1329, 1330, 1331, 1332, 1333, 1334, 1335, 1336, 1337, 1338, 1339,
+            1343, 1344, 1345, 1347, 1358, 1359, 1362, 1365, 1371, 1372,
+            1409, 1415, 1430, 1439, 1442, 1574, 2613, 2770, 2890, 2923, 3035
+        };
+        constexpr int TRASH_BIN_MODEL_COUNT =
+            sizeof(TRASH_BIN_MODEL_IDS) / sizeof(TRASH_BIN_MODEL_IDS[0]);
+        // Loose rubbish, black bags, street rubbish and procedural rubbish.
+        // These are valid rat anchors too; the rat remains within the same
+        // wider local wander area instead of spawning randomly on the road.
+        constexpr int TRASH_DEBRIS_MODEL_IDS[] = {
+            849, 850, 851, 852, 853, 854, 910, 926, 928,
+            1236, 1264, 1265, 1327, 16444,
+            18099, 18100, 18101,
+            2670, 2671, 2672, 2673, 2674, 2675, 2676, 2677,
+            2770, 2840, 2860, 2866, 3005, 3008, 3011, 3012,
+            3092, 3098
+        };
+        constexpr int TRASH_DEBRIS_MODEL_COUNT =
+            sizeof(TRASH_DEBRIS_MODEL_IDS) / sizeof(TRASH_DEBRIS_MODEL_IDS[0]);
 
         struct RatObject
         {
             int handle = -1;
             float x = 0.0f, y = 0.0f, z = 0.0f;
             float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
+            float homeX = 0.0f, homeY = 0.0f, homeZ = 0.0f;
             bool active = false;
         };
 
         RatObject g_rats[MAX_RATS];
+        struct RecentAnchor
+        {
+            float x = 0.0f;
+            float y = 0.0f;
+            unsigned int usedAt = 0;
+            bool valid = false;
+        };
+        RecentAnchor g_recentAnchors[16];
+        int g_recentAnchorCursor = 0;
         // Stock tall-grass model replaced with the rat mesh by XkiLoader.
         int g_modelId = DEFAULT_MODEL_ID;
         int g_maxRats = 5;
         int g_spawnIntervalMs = 6000;
         float g_moveSpeed = 3.0f;
-        float g_ratScale = 0.25f;
+        float g_ratScale = 0.10f;
         float g_headingOffset = -90.0f;
         bool g_soundEnabled = true;
         float g_soundRadius = 20.0f;
@@ -67,7 +108,7 @@ namespace Rat
         bool g_modelReady = false;
         bool g_enabled = false;
         bool g_spawnFailureLogged = false;
-        bool g_spawnPointFailureLogged = false;
+        bool g_binSearchFailureLogged = false;
         bool g_playerUnavailableLogged = false;
         bool g_interiorLogged = false;
         bool g_modelStateLogged = false;
@@ -225,7 +266,7 @@ namespace Rat
                 return false;
             }
             (*g_audioPlayerObject)->GetInterface(g_audioPlayerObject, SL_IID_VOLUME, &g_audioVolume);
-            LocalLog("Rat sound player is ready.");
+            LocalLog("Rat squeak/chitter sound player is ready.");
             return true;
         }
 
@@ -265,7 +306,7 @@ namespace Rat
                 const unsigned int baseInterval = nearbyRats >= 5 ? 1050U : 2850U - static_cast<unsigned int>(nearbyRats - 1) * 420U;
                 const unsigned int jitter = static_cast<unsigned int>(std::rand() % 550);
                 g_nextSqueakTime = now + baseInterval + jitter;
-                LocalLog("Rat chirps played: nearby=%d distance=%.1f volume=%.2f next=%ums.",
+                LocalLog("Rat squeak/chitter call played: nearby=%d distance=%.1f volume=%.2f next=%ums.",
                     nearbyRats, distance, volume, baseInterval + jitter);
             }
         }
@@ -293,60 +334,176 @@ namespace Rat
             return count;
         }
 
-        bool FindStreetPoint(const CVector& center, float minRadius, float maxRadius,
+        bool WasAnchorUsedRecently(float x, float y, unsigned int now)
+        {
+            const float cooldownSq = ANCHOR_COOLDOWN_RADIUS * ANCHOR_COOLDOWN_RADIUS;
+            for (RecentAnchor& anchor : g_recentAnchors)
+            {
+                if (!anchor.valid) continue;
+                if (now - anchor.usedAt >= ANCHOR_COOLDOWN_MS)
+                {
+                    anchor.valid = false;
+                    continue;
+                }
+                const float dx = anchor.x - x;
+                const float dy = anchor.y - y;
+                if (dx * dx + dy * dy < cooldownSq) return true;
+            }
+            return false;
+        }
+
+        void RememberAnchor(float x, float y, unsigned int now)
+        {
+            RecentAnchor& anchor = g_recentAnchors[g_recentAnchorCursor];
+            anchor.x = x;
+            anchor.y = y;
+            anchor.usedAt = now;
+            anchor.valid = true;
+            g_recentAnchorCursor = (g_recentAnchorCursor + 1) %
+                (sizeof(g_recentAnchors) / sizeof(g_recentAnchors[0]));
+        }
+
+        bool IsTrashAnchorModel(int modelId)
+        {
+            for (int i = 0; i < TRASH_BIN_MODEL_COUNT; ++i)
+                if (TRASH_BIN_MODEL_IDS[i] == modelId) return true;
+            for (int i = 0; i < TRASH_DEBRIS_MODEL_COUNT; ++i)
+                if (TRASH_DEBRIS_MODEL_IDS[i] == modelId) return true;
+            return false;
+        }
+
+        bool IsBeachSurface(const CVector& position)
+        {
+            CColPoint collisionPoint = {};
+            CEntity* hitEntity = nullptr;
+            if (!CWorld::ProcessVerticalLine(
+                    CVector(position.x, position.y, position.z + 8.0f), position.z - 8.0f,
+                    collisionPoint, hitEntity,
+                    true, false, false, true, false, true, nullptr))
+                return false;
+            return collisionPoint.m_nSurfaceTypeA == SURFACE_SAND_BEACH ||
+                collisionPoint.m_nSurfaceTypeA == SURFACE_CONCRETE_BEACH ||
+                collisionPoint.m_nSurfaceTypeB == SURFACE_SAND_BEACH ||
+                collisionPoint.m_nSurfaceTypeB == SURFACE_CONCRETE_BEACH;
+        }
+
+        bool IsWaterAt(const CVector& position, float groundZ)
+        {
+            float waterZ = 0.0f;
+            if (!Command<Commands::GET_WATER_HEIGHT_AT_COORDS>(
+                    position.x, position.y, groundZ + 2.0f, &waterZ))
+                return false;
+            return std::isfinite(waterZ) && groundZ <= waterZ + 0.75f;
+        }
+
+        bool FindBinWanderPoint(const CVector& binPosition, float radius,
             float& x, float& y, float& z)
         {
-            for (int attempt = 0; attempt < 20; ++attempt)
+            for (int attempt = 0; attempt < 18; ++attempt)
             {
                 const float angle = RandomFloat(0.0f, 6.28318531f);
-                const float radius = RandomFloat(minRadius, maxRadius);
-                const float queryX = center.x + std::cos(angle) * radius;
-                const float queryY = center.y + std::sin(angle) * radius;
-                float nodeX = queryX, nodeY = queryY, nodeZ = center.z;
-                float heading = 0.0f;
-                if (!Command<Commands::GET_CLOSEST_CAR_NODE_WITH_HEADING>(
-                        queryX, queryY, center.z, &nodeX, &nodeY, &nodeZ, &heading))
+                const float distance = RandomFloat(BIN_MIN_OFFSET, radius);
+                x = binPosition.x + std::cos(angle) * distance;
+                y = binPosition.y + std::sin(angle) * distance;
+                if (!Command<Commands::GET_GROUND_Z_FOR_3D_COORD>(x, y, binPosition.z + 12.0f, &z))
                     continue;
-
-                const float dx = nodeX - queryX;
-                const float dy = nodeY - queryY;
-                if (dx * dx + dy * dy > 64.0f) continue;
-                const float roadAngle = heading * 0.01745329252f;
-                const float sideOffset = RandomFloat(-1.8f, 1.8f);
-                x = nodeX + std::cos(roadAngle) * sideOffset;
-                y = nodeY + std::sin(roadAngle) * sideOffset;
-                if (!Command<Commands::GET_GROUND_Z_FOR_3D_COORD>(x, y, nodeZ + 12.0f, &z))
-                    continue;
-                if (!std::isfinite(z) || std::fabs(z - nodeZ) > 5.0f) continue;
+                if (!std::isfinite(z) || std::fabs(z - binPosition.z) > 3.0f) continue;
+                if (IsBeachSurface(CVector(x, y, z))) continue;
+                if (IsWaterAt(CVector(x, y, z), z)) continue;
                 return true;
             }
             return false;
         }
 
-        bool Spawn(const CVector& playerPosition)
+        bool FindNearbyTrashAnchor(const CVector& playerPosition,
+            unsigned int now, float& binX, float& binY, float& binZ, int& binModelId)
+        {
+            CEntity* entities[MAX_NEARBY_WORLD_ENTITIES] = {};
+            i16 entityCount = 0;
+            CWorld::FindObjectsInRange(playerPosition, g_spawnRadius, true, &entityCount,
+                MAX_NEARBY_WORLD_ENTITIES, entities,
+                true, false, false, true, false);
+
+            float nearestDistanceSq = g_spawnRadius * g_spawnRadius;
+            bool found = false;
+            for (int i = 0; i < entityCount; ++i)
+            {
+                CEntity* entity = entities[i];
+                if (!entity || (!entity->IsObject() && !entity->IsBuilding())) continue;
+                if (!IsTrashAnchorModel(static_cast<int>(entity->m_nModelIndex))) continue;
+
+                const CVector position = entity->GetPosition();
+                const float dx = position.x - playerPosition.x;
+                const float dy = position.y - playerPosition.y;
+                const float dz = position.z - playerPosition.z;
+                const float distanceSq = dx * dx + dy * dy + dz * dz;
+                if (distanceSq < g_spawnMinDistance * g_spawnMinDistance ||
+                    distanceSq > g_spawnRadius * g_spawnRadius || distanceSq >= nearestDistanceSq)
+                    continue;
+
+                float groundZ = position.z;
+                if (!Command<Commands::GET_GROUND_Z_FOR_3D_COORD>(
+                        position.x, position.y, position.z + 20.0f, &groundZ))
+                    continue;
+                if (!std::isfinite(groundZ) || std::fabs(groundZ - position.z) > 8.0f)
+                    continue;
+                if (IsWaterAt(CVector(position.x, position.y, groundZ), groundZ)) continue;
+                if (WasAnchorUsedRecently(position.x, position.y, now)) continue;
+
+                bool occupied = false;
+                for (const RatObject& rat : g_rats)
+                {
+                    if (!rat.active) continue;
+                    const float homeDx = rat.homeX - position.x;
+                    const float homeDy = rat.homeY - position.y;
+                    if (homeDx * homeDx + homeDy * homeDy < 4.0f) {
+                        occupied = true;
+                        break;
+                    }
+                }
+                if (occupied) continue;
+
+                nearestDistanceSq = distanceSq;
+                binX = position.x;
+                binY = position.y;
+                binZ = groundZ;
+                binModelId = static_cast<int>(entity->m_nModelIndex);
+                found = true;
+            }
+            return found;
+        }
+
+        bool Spawn(const CVector& playerPosition, unsigned int now)
         {
             RatObject* slot = nullptr;
             for (RatObject& rat : g_rats)
                 if (!rat.active) { slot = &rat; break; }
             if (!slot) return false;
 
+            float binX = 0.0f, binY = 0.0f, binZ = 0.0f;
             float x = 0.0f, y = 0.0f, z = 0.0f;
-            if (!FindStreetPoint(playerPosition, g_spawnMinDistance, g_spawnRadius, x, y, z))
+            int binModelId = 0;
+            if (!FindNearbyTrashAnchor(playerPosition, now, binX, binY, binZ, binModelId))
             {
-                if (!g_spawnPointFailureLogged)
+                if (!g_binSearchFailureLogged)
                 {
-                    LocalLog("Spawn skipped: no suitable road node/ground point within %.1f-%.1f units.",
+                    LocalLog("Spawn skipped: no loaded trash-bin or loose-trash object ID found within %.1f-%.1f units.",
                         g_spawnMinDistance, g_spawnRadius);
-                    g_spawnPointFailureLogged = true;
+                    g_binSearchFailureLogged = true;
                 }
                 return false;
             }
-            g_spawnPointFailureLogged = false;
-            if (!FindStreetPoint(CVector(x, y, z), 10.0f, 28.0f,
+            g_binSearchFailureLogged = false;
+            slot->homeX = binX;
+            slot->homeY = binY;
+            slot->homeZ = binZ;
+            if (!FindBinWanderPoint(CVector(binX, binY, binZ), BIN_WANDER_RADIUS, x, y, z))
+                return false;
+            if (!FindBinWanderPoint(CVector(binX, binY, binZ), BIN_WANDER_RADIUS,
                     slot->targetX, slot->targetY, slot->targetZ))
             {
-                slot->targetX = x + RandomFloat(-12.0f, 12.0f);
-                slot->targetY = y + RandomFloat(-12.0f, 12.0f);
+                slot->targetX = x;
+                slot->targetY = y;
                 slot->targetZ = z;
             }
 
@@ -372,9 +529,11 @@ namespace Rat
             slot->handle = handle;
             slot->x = x; slot->y = y; slot->z = z;
             slot->active = true;
-            logger->Info("Spawned rat model %d at %.1f, %.1f, %.1f.", g_modelId, x, y, z);
-            LocalLog("Rat spawned: model=%d handle=%d position=(%.2f, %.2f, %.2f).",
-                g_modelId, handle, x, y, z);
+            RememberAnchor(binX, binY, now);
+            logger->Info("Spawned rat model %d beside trash-bin object %d at %.1f, %.1f, %.1f.",
+                g_modelId, binModelId, x, y, z);
+            LocalLog("Rat spawned beside bin: ratModel=%d binModel=%d handle=%d bin=(%.2f, %.2f, %.2f) position=(%.2f, %.2f, %.2f).",
+                g_modelId, binModelId, handle, binX, binY, binZ, x, y, z);
             g_spawnFailureLogged = false;
             return true;
         }
@@ -488,12 +647,22 @@ namespace Rat
                     continue;
                 }
 
+                const float homeDx = rat.homeX - rat.x;
+                const float homeDy = rat.homeY - rat.y;
+                if (homeDx * homeDx + homeDy * homeDy > BIN_WANDER_RADIUS * BIN_WANDER_RADIUS)
+                {
+                    if (!FindBinWanderPoint(CVector(rat.homeX, rat.homeY, rat.homeZ),
+                            BIN_WANDER_RADIUS, rat.targetX, rat.targetY, rat.targetZ))
+                        continue;
+                }
+
                 float dx = rat.targetX - rat.x;
                 float dy = rat.targetY - rat.y;
                 const float distance = std::sqrt(dx * dx + dy * dy);
                 if (distance < 1.0f)
                 {
-                    if (!FindStreetPoint(CVector(rat.x, rat.y, rat.z), 8.0f, 24.0f,
+                    if (!FindBinWanderPoint(CVector(rat.homeX, rat.homeY, rat.homeZ),
+                            BIN_WANDER_RADIUS,
                             rat.targetX, rat.targetY, rat.targetZ))
                         continue;
                     dx = rat.targetX - rat.x;
@@ -513,7 +682,7 @@ namespace Rat
             UpdateRatSound(now, playerPosition);
 
             if (Count() >= g_maxRats || static_cast<int>(now - g_nextSpawnTime) < 0) return;
-            if (Spawn(playerPosition)) g_nextSpawnTime = now + static_cast<unsigned int>(g_spawnIntervalMs);
+            if (Spawn(playerPosition, now)) g_nextSpawnTime = now + static_cast<unsigned int>(g_spawnIntervalMs);
             else g_nextSpawnTime = now + 1500U;
         }
     }
@@ -536,7 +705,9 @@ namespace Rat
             if (dataPath && dataPath[0])
             {
                 std::snprintf(g_localLogPath, sizeof(g_localLogPath), "%s/RubbishRat.log", dataPath);
-                g_localLog = std::fopen(g_localLogPath, "w");
+                // Puddle diagnostics append to this same file. Use append
+                // mode so separate FILE handles never overwrite their entries.
+                g_localLog = std::fopen(g_localLogPath, "a");
             }
             if (g_localLog)
                 LocalLog("Rat diagnostics started. Log file: %s", g_localLogPath);
@@ -545,10 +716,11 @@ namespace Rat
         }
 
         g_modelId = modelId;
-        g_maxRats = maxRats < 1 ? 1 : (maxRats > MAX_RATS ? MAX_RATS : maxRats);
-        g_spawnIntervalMs = spawnIntervalMs < 1000 ? 1000 : spawnIntervalMs;
+        g_maxRats = maxRats < 1 ? 1 : (maxRats > MAX_CONFIGURED_RATS ? MAX_CONFIGURED_RATS : maxRats);
+        g_spawnIntervalMs = spawnIntervalMs < 15000 ? 15000 : spawnIntervalMs;
         g_moveSpeed = moveSpeed < 0.2f ? 0.2f : (moveSpeed > 4.0f ? 4.0f : moveSpeed);
-        g_ratScale = scale < 0.05f ? 0.05f : (scale > 2.0f ? 2.0f : scale);
+        // Keep the rat small even if an existing INI still requests 0.15.
+        g_ratScale = scale < 0.03f ? 0.03f : (scale > 0.10f ? 0.10f : scale);
         g_headingOffset = headingOffset;
         g_soundEnabled = soundEnabled;
         g_soundRadius = soundRadius < 3.0f ? 3.0f : (soundRadius > 100.0f ? 100.0f : soundRadius);
@@ -558,9 +730,9 @@ namespace Rat
         g_cleanupRadius = cleanupRadius < g_spawnRadius + 8.0f
             ? g_spawnRadius + 8.0f : cleanupRadius;
         g_enabled = enabled && g_modelId > 0;
-        LocalLog("Config: enabled=%d modelId=%d maxRats=%d interval=%dms speed=%.2f spawnDistance=%.1f-%.1f cleanup=%.1f",
+        LocalLog("Config: enabled=%d modelId=%d maxRats=%d interval=%dms speed=%.2f scale=%.2f spawnDistance=%.1f-%.1f cleanup=%.1f",
             g_enabled ? 1 : 0, g_modelId, g_maxRats, g_spawnIntervalMs,
-            g_moveSpeed, g_spawnMinDistance, g_spawnRadius, g_cleanupRadius);
+            g_moveSpeed, g_ratScale, g_spawnMinDistance, g_spawnRadius, g_cleanupRadius);
         if (!g_enabled)
         {
             LocalLog("Rat spawning disabled by config or invalid model ID.");
